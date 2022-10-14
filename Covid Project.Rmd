@@ -1,0 +1,277 @@
+---
+title: "Covid Project"
+author: "muhu"
+date: "11/6/2021"
+output: html_document
+---
+Step 1: Dataset Preparation
+```{r}
+#1st round of reducing predictors based on existing research
+rm(list=ls())
+library(dplyr)
+setwd("C:/Users/Mu/Desktop/STAT6214 Applied linear")
+myvars <- c("State_name","County_name","pct_Males_ACS_15_19","pct_Pop_under_5_ACS_15_19","pct_Pop_5_17_ACS_15_19","pct_Pop_18_24_ACS_15_19","pct_Pop_25_44_ACS_15_19","pct_Pop_45_64_ACS_15_19","pct_Pop_65plus_ACS_15_19","pct_Hispanic_ACS_15_19","pct_NH_White_alone_ACS_15_19","pct_NH_Blk_alone_ACS_15_19","pct_NH_AIAN_alone_ACS_15_19","pct_NH_Asian_alone_ACS_15_19","pct_NH_NHOPI_alone_ACS_15_19","pct_NH_SOR_alone_ACS_15_19","pct_Not_HS_Grad_ACS_15_19","pct_College_ACS_15_19","pct_Pov_Univ_ACS_15_19","pct_Prs_Blw_Pov_Lev_ACS_15_19","pct_One_Health_Ins_ACS_15_19","pct_TwoPHealthIns_ACS_15_19","pct_No_Health_Ins_ACS_15_19","pct_Civ_unemp_16p_ACS_15_19","pct_Civ_unemp_16_24_ACS_15_19","pct_Civ_unemp_25_44_ACS_15_19","pct_Civ_unemp_45_64_ACS_15_19","pct_Pop_Disabled_ACS_15_19","pct_Children_in_Pov_ACS_15_19","pct_NoHealthIns_U19_ACS_15_19","pct_NoHealthIns1964_ACS_15_19","pct_NoHealthIns_65P_ACS_15_19","avg_Tot_Prns_in_HHD_ACS_15_19","avg_Agg_HH_INC_ACS_15_19","pct_Vacant_Units_ACS_15_19","pct_Renter_Occp_HU_ACS_15_19","pct_Crowd_Occp_U_ACS_15_19","pct_NO_PH_SRVC_ACS_15_19","pct_No_Plumb_ACS_15_19","avg_Agg_House_Value_ACS_15_19","pct_HHD_w_Computer_ACS_15_19","pct_HHD_No_Internet_ACS_15_19","pct_Vacants_CEN_2010","pct_Schl_Enroll_3_4_ACS_15_19")
+
+#aggregate 'demography' dataset to county level
+demography = read.csv(file="pdb2021trv3_us.csv",header=TRUE)
+demography_sub = demography[,myvars]
+demography_sub$avg_Agg_HH_INC_ACS_15_19 <- as.numeric(gsub("\\$|,","",demography_sub$avg_Agg_HH_INC_ACS_15_19))
+demography_sub$avg_Agg_House_Value_ACS_15_19 <- as.numeric(gsub("\\$|,","",demography_sub$avg_Agg_House_Value_ACS_15_19))
+data1 <- aggregate(demography_sub[,-c(1:2)],by=list(demography_sub$State_name,demography_sub$County_name),mean,na.rm=TRUE)
+data2 <- aggregate(demography$Tot_Population_ACS_15_19,by=list(demography$State_name,demography$County_name),sum,na.rm=TRUE)
+colnames(data2)[3] <- "total_population"
+data <- cbind(data1, data2$total_population) 
+colnames(data)[1:2] <- c("State","County")
+data$State <- gsub(" ", "-", stringr::str_to_title(data$State))
+head(data)
+
+#create region 
+data$region = ifelse(data$State %in% c("Connecticut","Maine","Massachusetts","New Hampshire","Rhode Island","Vermont","New Jersey","New York","Pennsylvania"),"Northeast",
+                ifelse(data$State %in% c("Indiana","Illinois","Michigan","Ohio","Wisconsin","Iowa","Kansas","Minnesota","Missouri","Nebraska","North Dakota","South Dakota"), "Midwest",
+                ifelse(data$State %in% c("Arizona","Colorado","Idaho","New Mexico","Montana","Utah","Nevada","Wyoming","Alaska","California","Hawaii","Oregon","Washington"),"West",
+                       "South")))
+table(data$region, data$State)
+
+#merge two datasets(count & demographic)
+load("count.RData")
+str(count)
+count$County <- gsub(",| of","",count$County) %>% gsub("City","city",.)
+Covid <- dplyr::inner_join(count,data,by=c("State","County"))
+```
+Step 2: determine response variable
+```{r}
+Covid_case_rate <- 100*(Covid$Cases / Covid$`data2$total_population`)
+newdata <- Covid[,-c(1,2,3,4,5,6,51)]
+Covid_new <- cbind(Covid_case_rate,newdata)
+lmod_base <- lm(Covid_case_rate~., Covid_new, na.action=na.exclude)
+plot(lmod_base)
+
+#investigate outliers
+Covid_new[c(257,412,1270,2583),]
+#remove influential points and extreme outliers
+Covid_a <- Covid_new[-c(257,412,1270,2583),]
+lmod_a <- update(lmod_base,data=Covid_a)
+plot(lmod_a)
+Covid_r <- Covid_new[-c(257,412,1270,2583,2509,2797,448,2670,2650),]
+lmod_r <- update(lmod_base,data=Covid_r)
+plot(lmod_r)
+
+#transformation and compare
+par(mfrow=c(1,2))
+hist(Covid_r$Covid_case_rate,freq=FALSE,main="Histogram of Covid case rate",xlab="Covid case rate",ylim = c(0,0.12))
+lines(density(Covid_r$Covid_case_rate))
+hist(log(Covid_r$Covid_case_rate), freq = FALSE, main = "Histogram of log(Covid case rate)", xlab = "log(Covid case rate)",ylim = c(0,2.0))
+lines(density(log(Covid_r$Covid_case_rate)))
+
+#create response variable
+Covid_case_rate_r <- ifelse(Covid_new$Covid_case_rate == 0, Covid_new$Covid_case_rate+0.000001,Covid_new$Covid_case_rate)
+
+```
+
+Step3: Further reduce predictors
+```{r}
+#2nd round of reducing predictors by Lasso Regression
+library(glmnet)
+set.seed(123)
+options(na.action = "na.pass")
+x <- model.matrix(Covid_case_rate~., Covid_new)[,-1]
+y <- log(Covid_case_rate_r)
+cv <- cv.glmnet(x,y, alpha = 1)
+cv$lambda.min
+model <- glmnet(x, y, alpha = 1, lambda = cv$lambda.min)
+coef(model)
+
+#determine predictors for linear regression model
+myvars2 <- c("% OF POP. FULLY VACCINATED","pct_Pop_under_5_ACS_15_19","pct_Pop_5_17_ACS_15_19","pct_Pop_45_64_ACS_15_19","pct_NH_White_alone_ACS_15_19","pct_NH_Blk_alone_ACS_15_19","pct_NH_NHOPI_alone_ACS_15_19","pct_College_ACS_15_19","pct_Pov_Univ_ACS_15_19","pct_TwoPHealthIns_ACS_15_19","pct_No_Health_Ins_ACS_15_19","pct_Vacant_Units_ACS_15_19","pct_Renter_Occp_HU_ACS_15_19","pct_Crowd_Occp_U_ACS_15_19","pct_NO_PH_SRVC_ACS_15_19","pct_No_Plumb_ACS_15_19","pct_HHD_w_Computer_ACS_15_19","region")
+new_data <- Covid_new[,myvars2]
+response <- log(Covid_case_rate_r)
+fdata <- cbind(response,new_data)
+```
+
+Step 4: Explanatory Data Analysis(EDA)
+```{r}
+dim(fdata)
+str(fdata)
+fdata$region <- as.factor(fdata$region)
+summary(fdata)
+
+#check missing value
+sort(Covid$pct_Pop_5_17_ACS_15_19)
+#sort(Covid$pct_NH_Blk_alone_ACS_15_19)
+#sort(Covid$pct_NH_NHOPI_alone_ACS_15_19)
+#sort(Covid$pct_No_Health_Ins_ACS_15_19)
+#sort(Covid$pct_Crowd_Occp_U_ACS_15_19)
+#sort(Covid$pct_NO_PH_SRVC_ACS_15_19)
+#sort(Covid$pct_No_Plumb_ACS_15_19)
+
+#Checking correlation
+corr_score <- cor(fdata[,-19])
+library(ggplot2)
+library(RColorBrewer)
+library(GGally)
+heatmap(corr_score,scale="column",col=colorRampPalette(brewer.pal(8,"PiYG"))(18))
+legend(x="left",legend=c(0,0.2,0.4,0.6,0.8,1.0),cex=0.8,
+       fill=colorRampPalette(brewer.pal(8,"PiYG"))(6))
+cor(as.matrix(fdata[,-19]))
+ggpairs(fdata[fdata$response >= 0,],columns=c(1,2,4,5,8),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+
+#understand categorical feature(region)
+ggplot(fdata[fdata$response >= 0,],aes(x=region,y=response,fill=region),)+
+  geom_boxplot(alpha=0.3)+
+  theme(legend.position = "none")+
+  scale_fill_brewer(palette="BuPu")+
+  labs(title = "Boxplot: log-Covid case rate by region",x="Region",y="log(Covid case rate)")
+```
+
+Step 5: Fit linear regression reference model
+```{r}
+lmod_ref <- lm(response~.,fdata)
+summary(lmod_ref)
+#Assumption checking
+plot(lmod_ref)
+require(lmtest)
+bptest(lmod_ref)
+```
+
+Step 6: Investigate outliers again(response variable change compared to the last one)
+```{r}
+Covid_new[c(548,550,77),]
+fdata_r <- Covid_new[-c(548,550,77,72),c("Covid_case_rate",myvars2)] #this is my final dataset
+#recreate response variable
+fdata_r$response <- log(ifelse(fdata_r$Covid_case_rate == 0, fdata_r$Covid_case_rate+0.000001,fdata_r$Covid_case_rate))
+fdata_r$region <- as.factor(fdata_r$region)
+lmod_ref_r <- update(lmod_ref,data=fdata_r[,-1])
+plot(lmod_ref_r)
+```
+
+```{r}
+summary(lmod_ref_r) #this is my reference model for comparison in the future
+summary(lmod_ref)
+```
+
+Step 7: Explore interaction and polynomial terms
+```{r}
+#explore interaction terms
+ggplot(data=fdata_r, aes(x=`% OF POP. FULLY VACCINATED`, y=response, group=region))+
+      geom_line(size=1, aes(color=region))+
+      ylab("log(Covid Case rate)")+
+      xlab("Pct of population fully vaccinated")+
+      ggtitle("Interaction on region and fully vaccinated pct")
+```
+
+```{r}
+ggpairs(fdata_r,columns=c(20,4),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+```
+
+```{r}
+ggpairs(fdata_r,columns=c(20,6),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+```
+```{r}
+ggpairs(fdata_r,columns=c(20,7),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+```
+```{r}
+ggpairs(fdata_r,columns=c(20,8),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+```
+```{r}
+ggpairs(fdata_r,columns=c(20,9),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+```
+```{r}
+ggpairs(fdata_r,columns=c(20,12),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+```
+```{r}
+ggpairs(fdata_r,columns=c(20,13),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+```
+```{r}
+ggpairs(fdata_r,columns=c(20,15),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+```
+```{r}
+ggpairs(fdata_r,columns=c(20,17),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+```
+```{r}
+ggpairs(fdata_r,columns=c(20,18),aes(color=region,alpha=0.5),
+        lower=list(continuous="smooth"))
+```
+
+Above are the continuous explanatory variables I selected that may have interactions with region.
+```{r}
+#Explore polynomial terms
+#Both the residual vs fitted plot and scale-location plot suggest a quadratic term
+
+summary(lm(response~I(`% OF POP. FULLY VACCINATED`^2),fdata_r[,-1])) #R-square-value:14
+#summary(lm(response~I(pct_Pop_5_17_ACS_15_19^2),fdata_r[,-1])) #R-square-value:5.9
+#summary(lm(response~I(pct_Pop_45_64_ACS_15_19^2),fdata_r[,-1])) #R-square-value:4.7
+#summary(lm(response~I(pct_College_ACS_15_19^2),fdata_r[,-1])) #R-square-value:11.22
+
+```
+The selective criterion is p-value < 0.05 and R squared value > 4%
+
+Step8: Variable Selection in Linear Regression Model
+```{r}
+#Stepwise
+null <- lm(response~1,data=fdata_r[,-1]) # define intercept_only model
+full <- lm(response ~. +region:`% OF POP. FULLY VACCINATED`+
+             region:pct_Pop_5_17_ACS_15_19+
+             region:pct_NH_White_alone_ACS_15_19+
+             region:pct_NH_Blk_alone_ACS_15_19+
+             region:pct_NH_NHOPI_alone_ACS_15_19+
+             region:pct_College_ACS_15_19+
+             region:pct_No_Health_Ins_ACS_15_19+
+             region:pct_Vacant_Units_ACS_15_19+
+             region:pct_Crowd_Occp_U_ACS_15_19+
+             region:pct_No_Plumb_ACS_15_19+
+             I(`% OF POP. FULLY VACCINATED`^2)+
+             I(pct_Pop_5_17_ACS_15_19^2)+
+             I(pct_Pop_45_64_ACS_15_19^2)+
+             I(pct_College_ACS_15_19^2),data=fdata_r[,-1])
+lmod_stepwise <- step(null,direction = "both",scope=formula(full),trace=0)
+summary(lmod_stepwise)
+```
+
+Step 9: Further adjustment
+```{r}
+#remove statistically insignificant(at 5% level) predictors
+lmod_f <- update(lmod_stepwise,.~. -pct_Crowd_Occp_U_ACS_15_19-
+                   pct_NH_NHOPI_alone_ACS_15_19-
+                   pct_Vacant_Units_ACS_15_19)
+summary(lmod_f)
+```
+```{r}
+library(car)
+vif(lmod_stepwise)
+```
+```{r}
+lmod_f2 <- update(lmod_stepwise,.~. -I(`% OF POP. FULLY VACCINATED`^2)
+                  )
+summary(lmod_f2)
+vif(lmod_f2)
+```
+```{r}
+lmod_f3 <- update(lmod_f2,.~. -region:`% OF POP. FULLY VACCINATED`
+                  )
+summary(lmod_f3)
+vif(lmod_f3)
+```
+Step10: Model Comparison
+```{r}
+plot(lmod_f2)
+plot(lmod_ref_r)
+```
+
+```{r}
+summary(lmod_f2)
+summary(lmod_ref_r)
+```
+
+Experiment trial using Machine learning to model(another file)
+
+
